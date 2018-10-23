@@ -1,0 +1,202 @@
+# MUST DO
+# remove data older than X days (4)
+# unit tests
+# backtester
+
+#
+# NICE TO HAVE
+# more robust pattern for getting prices
+# return error types from lambda on error so I can see them in SF console
+# concurrent requests to get price data rather than serial (3)
+# automation tests
+
+service: bittrex-trader
+
+provider:
+  name: aws
+  runtime: nodejs6.10
+  region: us-west-2
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+      - s3:PutObject
+      - s3:GetObject
+      - s3:DeleteObject
+      Resource:
+      - arn:aws:s3:::efoard-bittrex-prices/*
+    - Effect: Allow
+      Action:
+      - states:ListExecutions
+      - states:listStateMachines
+      Resource:
+      - "arn:aws:states:us-west-2:374490386204:*"
+    - Effect: Allow
+      Action:
+        - ses:SendEmail
+      Resource:
+        - arn:aws:ses:us-west-2:374490386204:identity/foard265@gmail.com
+  timeout: 10 # optional, in seconds, default is 6
+  memorySize: 512 # optional, in MB, default is 1024
+  environment:
+    ASSET_SLOTS: 2
+
+functions:
+  get-latest-prices:
+    handler: functions/get-latest-prices.handler
+    description: get latest prices from bittrex and update s3 buckets
+    memorySize: 1280
+    timeout: 120
+  has-open-executions:
+    handler: functions/has-open-executions.handler
+    description: check for open executions before trade action to prevent uncertain states
+  should-sell:
+    handler: functions/should-sell.handler
+    runtime: python2.7
+    description: for each asset held, decide if it is time to sell
+    memorySize: 1024
+    timeout: 60
+  execute-trades:
+    handler: functions/execute-trades.handler
+    description: execute any trades identified in previous step
+  should-buy:
+    handler: functions/should-buy.handler
+    runtime: python2.7
+    description: if buy slots available, find if buy opportunities exist
+    memorySize: 1280
+    timeout: 120
+  check-open-orders:
+    handler: functions/check-open-orders.handler
+    description: check for any open orders
+  cancel-open-orders:
+    handler: functions/cancel-open-orders.handler
+    description: cancel any open orders that are not completed within the alloted time
+  trade-notification:
+    handler: functions/trade-notification.handler
+    description: send notification of any executed trade
+
+custom:
+  alerts:
+    topics:
+      alarm:
+        topic: bittrex-trader-alerts-alarm
+        notifications:
+          - protocol: email
+            endpoint: foard265@gmail.com
+    alarms:
+      - functionErrors
+      - functionThrottles
+
+stepFunctions:
+  stateMachines:
+    BittrexTrader:
+      events:
+        - schedule:
+            rate: rate(5 minutes)
+            input:
+              market: BTC
+      definition:
+        StartAt: GetLatestPrices
+        States:
+          GetLatestPrices:
+            Next: GetOpenExecutions
+            Type: Task
+            Resource: arn:aws:lambda:us-west-2:374490386204:function:bittrex-trader-dev-get-latest-prices
+          GetOpenExecutions:
+            Next: HowManyOpenExecutions?
+            Type: Task
+            Resource: arn:aws:lambda:us-west-2:374490386204:function:bittrex-trader-dev-has-open-executions
+          HowManyOpenExecutions?:
+            Type: Choice
+            Choices:
+              - Variable: $.openExecutionsCount
+                NumericLessThanEquals: 1
+                Next: ShouldSell?
+              - Variable: $.openExecutionsCount
+                NumericGreaterThan: 1
+                Next: TradeNotification
+          ShouldSell?:
+            Type: Task
+            Resource: arn:aws:lambda:us-west-2:374490386204:function:bittrex-trader-dev-should-sell
+            Next: FoundSellOpportunities?
+          FoundSellOpportunities?:
+            Type: Choice
+            Choices:
+              - Variable: $.found_trades
+                BooleanEquals: true
+                Next: ExecuteSells
+              - Variable: $.found_trades
+                BooleanEquals: false
+                Next: ShouldBuy?
+          ExecuteSells:
+            Type: Task
+            Resource: arn:aws:lambda:us-west-2:374490386204:function:bittrex-trader-dev-execute-trades
+            Next: WaitForSellsToFinish
+          WaitForSellsToFinish:
+            Type: Wait
+            Seconds: 3
+            Next: HasOpenSellOrders?
+          HasOpenSellOrders?:
+            Type: Task
+            Resource: arn:aws:lambda:us-west-2:374490386204:function:bittrex-trader-dev-check-open-orders
+            Next: ShouldBuy?
+            Retry:
+            - ErrorEquals:
+              - OpenOrdersError
+              IntervalSeconds: 1
+              MaxAttempts: 6 # TODO: increase this to 7 (i.e. 128 seconds?)
+              BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                - States.ALL # should this be States.ALL?
+                Next: CancelOpenSellOrders
+          CancelOpenSellOrders:
+            Type: Task
+            Resource: arn:aws:lambda:us-west-2:374490386204:function:bittrex-trader-dev-cancel-open-orders
+            Next: ShouldBuy?
+          ShouldBuy?:
+            Type: Task
+            Resource: arn:aws:lambda:us-west-2:374490386204:function:bittrex-trader-dev-should-buy
+            Next: FoundBuyOpportunities?
+          FoundBuyOpportunities?:
+            Type: Choice
+            Choices:
+              - Variable: $.found_trades
+                BooleanEquals: true
+                Next: ExecuteBuys
+              - Variable: $.found_trades
+                BooleanEquals: false
+                Next: TradeNotification
+          ExecuteBuys:
+            Type: Task
+            Resource: arn:aws:lambda:us-west-2:374490386204:function:bittrex-trader-dev-execute-trades
+            Next: WaitForBuysToFinish
+          WaitForBuysToFinish:
+            Type: Wait
+            Seconds: 3
+            Next: HasOpenBuyOrders?
+          HasOpenBuyOrders?:
+            Type: Task
+            Resource: arn:aws:lambda:us-west-2:374490386204:function:bittrex-trader-dev-check-open-orders
+            Next: TradeNotification
+            Retry:
+            - ErrorEquals:
+              - OpenOrdersError
+              IntervalSeconds: 1
+              MaxAttempts: 6 # TODO: increase this to 7 (i.e. 128 seconds?)
+              BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                - States.ALL
+                Next: CancelOpenBuyOrders
+          CancelOpenBuyOrders:
+            Type: Task
+            Resource: arn:aws:lambda:us-west-2:374490386204:function:bittrex-trader-dev-cancel-open-orders
+            Next: TradeNotification
+          TradeNotification:
+            Type: Task
+            Resource: arn:aws:lambda:us-west-2:374490386204:function:bittrex-trader-dev-trade-notification
+            End: true
+
+plugins:
+  - serverless-step-functions
+  - serverless-plugin-aws-alerts

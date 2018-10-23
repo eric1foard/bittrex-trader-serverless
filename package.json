@@ -1,0 +1,29 @@
+{
+  "name": "bittrex",
+  "version": "1.0.0",
+  "description": "Trading system for bittrex exchange",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eric1foard/bittrex-trader.git"
+  },
+  "author": "Eric Foard",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/eric1foard/bittrex-trader/issues"
+  },
+  "homepage": "https://github.com/eric1foard/bittrex-trader#readme",
+  "dependencies": {
+    "axios": "^0.17.0",
+    "bluebird": "^3.5.1",
+    "moment": "^2.19.2"
+  },
+  "devDependencies": {
+    "serverless": "^1.25.0",
+    "serverless-plugin-aws-alerts": "^1.2.4",
+    "serverless-step-functions": "^1.2.0"
+  }
+}
